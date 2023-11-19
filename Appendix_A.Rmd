@@ -1,0 +1,425 @@
+---
+title: "Air Pollution Interpolation & Clustering"
+---
+
+Load all required libraries
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(sp)
+library(rgdal)
+library(tmap)
+library(gstat)
+library(spdep)
+library(sf)
+library(raster)
+```
+
+
+Loading the Monitor File
+```{r}
+Monitor_2020 <- read.csv("/Users/Shakeeb/Desktop/Air Pollution Interpolation & Clustering/annual_conc_by_monitor_2020.csv")
+```
+
+Our goal is to select 5 contiguous (compact states) in the United States to conduct spatial interpolation
+and spatial clustering of annual Nitrogen Dioxide (NO2), Ozone (O3), and particulate matter 2.5 (PM2.5)
+air pollution concentration.
+
+We are given Illinois 2020, the other 4 contiguous states other than Illinois we will use are: Indiana, Iowa, Wisconsin and Missiouri.
+
+State Codes: Illinois = 17, Indiana = 18, Iowa = 19, Missouri = 29, Wisconsin = 55, 
+Nitrogen dioxide (NO2)
+```{r}
+
+IIIWM_NO2 <-  Monitor_2020 %>% filter(Monitor_2020$Parameter.Name == "Nitrogen dioxide (NO2)" & Monitor_2020$Pollutant.Standard == "NO2 Annual 1971" & (Monitor_2020$State.Code==17 | 
+                                                                                    Monitor_2020$State.Code==18 | 
+                                                                                    Monitor_2020$State.Code==19 | 
+                                                                                    Monitor_2020$State.Code==29 | 
+                                                                                    Monitor_2020$State.Code==55))
+
+
+IIIWM_Ozone <-  Monitor_2020 %>% filter(Monitor_2020$Parameter.Name == "Ozone" & Monitor_2020$Pollutant.Standard == "Ozone 8-hour 2015" & (Monitor_2020$State.Code==17 | 
+                                                                                    Monitor_2020$State.Code==18 | 
+                                                                                    Monitor_2020$State.Code==19 | 
+                                                                                    Monitor_2020$State.Code==29 | 
+                                                                                    Monitor_2020$State.Code==55))
+
+
+IIIWM_PM2.5 <-  Monitor_2020 %>% filter(Monitor_2020$Parameter.Name == "PM2.5 - Local Conditions" & Monitor_2020$Pollutant.Standard == "PM25 Annual 2012"  & (Monitor_2020$State.Code==17 | 
+                                                                                    Monitor_2020$State.Code==18 | 
+                                                                                    Monitor_2020$State.Code==19 | 
+                                                                                    Monitor_2020$State.Code==29 | 
+                                                                                    Monitor_2020$State.Code==55))
+
+```
+
+
+Remove remaining duplicates in data 
+```{r}
+final_NO2 <- IIIWM_NO2 %>% distinct(Latitude, Longitude, .keep_all = TRUE) 
+final_Ozone <- IIIWM_Ozone %>% distinct(Latitude, Longitude, .keep_all = TRUE)
+final_PM2.5 <- IIIWM_PM2.5 %>% distinct(Latitude, Longitude, .keep_all = TRUE)
+```
+
+
+
+Making the data into a spatial dataframes 
+```{r}
+
+proj_string <- sp::CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+
+NO2_cords <- final_NO2[, c("Longitude", "Latitude")]
+spdf_NO2 <- sp::SpatialPointsDataFrame(coords = NO2_cords, data = final_NO2,
+                                       proj4string = proj_string)
+
+Ozone_cords <- final_Ozone[, c("Longitude", "Latitude")]
+spdf_Ozone <- sp::SpatialPointsDataFrame(coords = Ozone_cords, data = final_Ozone,
+                                       proj4string = proj_string)
+
+PM2.5_cords <- final_PM2.5[, c("Longitude", "Latitude")]
+spdf_PM2.5 <- sp::SpatialPointsDataFrame(coords = PM2.5_cords, data = final_PM2.5,
+                                       proj4string = proj_string)
+
+```
+
+
+Add Study Area Boundary
+```{r}
+
+study_area <- readOGR("/Users/Shakeeb/Desktop/Air Pollution Interpolation & Clustering/Study Area", layer="Counties")
+
+# Replace point boundary extent with that of Study Area
+spdf_NO2@bbox <- study_area@bbox
+spdf_Ozone@bbox <- study_area@bbox
+spdf_PM2.5@bbox <- study_area@bbox
+
+tm_shape(study_area) + tm_polygons() +
+  tm_shape(spdf_NO2) +
+  tm_dots(col="Arithmetic.Mean", palette = "-RdBu", auto.palette.mapping = FALSE,
+             title="NO2 Average Annual Concentration", size=0.7) +
+  tm_legend(legend.outside=TRUE)
+
+
+tm_shape(study_area) + tm_polygons() +
+  tm_shape(spdf_Ozone) +
+  tm_dots(col="Arithmetic.Mean", palette = "-RdBu", auto.palette.mapping = FALSE,
+             title="Ozone Average Annual Concentration", size=0.7) +
+  tm_legend(legend.outside=TRUE)
+
+
+tm_shape(study_area) + tm_polygons() +
+  tm_shape(spdf_PM2.5) +
+  tm_dots(col="Arithmetic.Mean", palette = "-RdBu", auto.palette.mapping = FALSE,
+             title="PM2.5 Average Annual Concentration", size=0.7) +
+  tm_legend(legend.outside=TRUE)
+```
+
+
+
+IDW and Leave One Out Cross Validation. Tested different k(idp) values for each pollutant to find best one 
+```{r}
+
+NO2IDW.out <- vector(length = length(spdf_NO2))
+for (i in 1:length(spdf_NO2)) {
+  NO2IDW.out[i] <- idw(Arithmetic.Mean ~ 1, spdf_NO2[-i,], spdf_NO2[i,], idp=4.0)$var1.pred
+}
+# Compute RMSE NO2
+sqrt( sum((NO2IDW.out - spdf_NO2$Arithmetic.Mean)^2) / length(spdf_NO2))
+
+
+OzoneIDW.out <- vector(length = length(spdf_Ozone))
+for (i in 1:length(spdf_Ozone)) {
+  OzoneIDW.out[i] <- idw(Arithmetic.Mean ~ 1, spdf_Ozone[-i,], spdf_Ozone[i,], idp=2.0)$var1.pred
+}
+# Compute RMSE Ozone
+sqrt( sum((OzoneIDW.out - spdf_Ozone$Arithmetic.Mean)^2) / length(spdf_Ozone))
+
+
+PM2.5IDW.out <- vector(length = length(spdf_PM2.5))
+for (i in 1:length(spdf_PM2.5)) {
+  PM2.5IDW.out[i] <- idw(Arithmetic.Mean ~ 1, spdf_PM2.5[-i,], spdf_PM2.5[i,], idp=3.0)$var1.pred
+}
+# Compute RMSE PM2.5
+sqrt( sum((PM2.5IDW.out - spdf_PM2.5$Arithmetic.Mean)^2) / length(spdf_PM2.5))
+
+
+```
+
+
+
+Mapping IDW Interpolation
+```{r}
+
+# NO2- Create an empty grid where n is the total number of cells
+grd_NO2              <- as.data.frame(spsample(spdf_NO2, "regular", n=50000))
+names(grd_NO2)       <- c("X", "Y")
+coordinates(grd_NO2) <- c("X", "Y")
+gridded(grd_NO2)     <- TRUE  # Create SpatialPixel object
+fullgrid(grd_NO2)    <- TRUE  # Create SpatialGrid object
+
+proj4string(grd_NO2) <- proj4string(spdf_NO2)
+
+NO2_idw_map <- gstat::idw(Arithmetic.Mean ~ 1, spdf_NO2, newdata=grd_NO2, idp=4.0)
+
+NO2_raster <- raster(NO2_idw_map)
+NO2_mask   <- mask(NO2_raster, study_area)
+
+tm_shape(NO2_mask) + 
+  tm_raster(n=10,palette = "-RdBu", auto.palette.mapping = FALSE,
+            title="NO2 Average Annual Concentration \n (K=4)") + 
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_NO2) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+
+# Ozone - Create an empty grid where n is the total number of cells
+grd_Ozone              <- as.data.frame(spsample(spdf_Ozone, "regular", n=50000))
+names(grd_Ozone)       <- c("X", "Y")
+coordinates(grd_Ozone) <- c("X", "Y")
+gridded(grd_Ozone)     <- TRUE  # Create SpatialPixel object
+fullgrid(grd_Ozone)    <- TRUE  # Create SpatialGrid object
+
+proj4string(grd_Ozone) <- proj4string(spdf_Ozone)
+
+Ozone_idw_map <- gstat::idw(Arithmetic.Mean ~ 1, spdf_Ozone, newdata=grd_Ozone, idp=2.0)
+
+Ozone_raster <- raster(Ozone_idw_map)
+Ozone_mask   <- mask(Ozone_raster, study_area)
+
+tm_shape(Ozone_mask) + 
+  tm_raster(n=10,palette = "-RdBu", auto.palette.mapping = FALSE,
+            title="Ozone Average Annual Concentration \n (K=2)") +
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_Ozone) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+
+# PM2.5 - Create an empty grid where n is the total number of cells
+grd_PM2.5              <- as.data.frame(spsample(spdf_PM2.5, "regular", n=50000))
+names(grd_PM2.5)       <- c("X", "Y")
+coordinates(grd_PM2.5) <- c("X", "Y")
+gridded(grd_PM2.5)     <- TRUE  # Create SpatialPixel object
+fullgrid(grd_PM2.5)    <- TRUE  # Create SpatialGrid object
+
+proj4string(grd_PM2.5) <- proj4string(spdf_PM2.5)
+
+PM2.5_idw_map <- gstat::idw(Arithmetic.Mean ~ 1, spdf_PM2.5, newdata=grd_PM2.5, idp=3.0)
+
+PM2.5_raster <- raster(PM2.5_idw_map)
+PM2.5_mask   <- mask(PM2.5_raster, study_area)
+
+tm_shape(PM2.5_mask) + 
+  tm_raster(n=10,palette = "-RdBu", auto.palette.mapping = FALSE,
+            title="PM2.5 Average Annual Concentration \n (K=3)") +
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_PM2.5) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE) 
+
+```
+
+
+
+Kriging
+
+
+Plotting air pollution concentrations
+```{r}
+
+ggplot(data = final_NO2) + 
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic.Mean),
+             color="brown", alpha=3/4) + ggtitle("NO2 Average Annual Concentration")
+
+ggplot(data = final_Ozone) + 
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic.Mean),
+             color="brown", alpha=3/4) + ggtitle("Ozone Average Annual Concentration")
+
+ggplot(data = final_PM2.5) + 
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic.Mean),
+             color="brown", alpha=3/4) + ggtitle("PM2.5 Average Annual Concentration")
+```
+
+
+
+# Fitting a Variogram
+
+First need to check if variables are normally distributed
+```{r}
+hist(spdf_NO2$Arithmetic.Mean)
+hist(spdf_Ozone$Arithmetic.Mean)
+hist(spdf_PM2.5$Arithmetic.Mean)
+shapiro.test(spdf_NO2$Arithmetic.Mean)
+shapiro.test(spdf_Ozone$Arithmetic.Mean)
+shapiro.test(spdf_PM2.5$Arithmetic.Mean)
+
+#Since they are we can continue to fitting the variogram
+```
+
+
+# Calculate Sample Variograms
+```{r}
+NO2_vgm <- variogram(Arithmetic.Mean~1, spdf_NO2)
+plot(NO2_vgm)
+
+
+
+
+Ozone_vgm <- variogram(Arithmetic.Mean~1, spdf_Ozone)
+plot(Ozone_vgm)
+
+
+
+
+PM2.5_vgm <- variogram(Arithmetic.Mean~1, spdf_PM2.5)
+plot(PM2.5_vgm)
+
+
+
+
+```
+
+View different models that can be used to fit data
+```{r}
+show.vgms()
+```
+Fit the variogram
+```{r}
+# We test multiple model types for each pollutant and then optimize sill, nugget, and range
+
+NO2_fit <- fit.variogram(NO2_vgm, model = vgm(psill = 25, nugget = 5, range = 100, model = "Mat"))
+plot(NO2_vgm, NO2_fit)
+
+
+Ozone_fit <- fit.variogram(Ozone_vgm, model = vgm(psill = 5.1e-06, nugget =  4.5e-06, range = 230, 
+                                                  model = "Lin"))
+plot(Ozone_vgm, Ozone_fit)
+
+
+PM2.5_fit <- fit.variogram(PM2.5_vgm, model = vgm(psill = 1, nugget = 0.7, range = 180, model = "Gau"))
+plot(PM2.5_vgm, PM2.5_fit)
+attr(NO2_fit, "SSErr")
+attr(Ozone_fit, "SSErr")
+attr(PM2.5_fit, "SSErr")
+```
+
+
+## Cross-Validation 
+
+Use LOOCV
+```{r}
+# We check the RMSE of the different model types to see which one fits the best
+
+RMSE_resid <- function(x){
+  return(sqrt(mean(x^2)))
+} 
+
+NO2_LOOCV_krige <-krige.cv(Arithmetic.Mean~1, spdf_NO2, model=NO2_fit)
+RMSE_resid(NO2_LOOCV_krige@data$residual)
+
+
+Ozone_LOOCV_krige <-krige.cv(Arithmetic.Mean~1, spdf_Ozone, model=Ozone_fit)
+RMSE_resid(Ozone_LOOCV_krige@data$residual)
+
+
+PM2.5_LOOCV_krige <-krige.cv(Arithmetic.Mean~1, spdf_PM2.5, model=PM2.5_fit)
+RMSE_resid(PM2.5_LOOCV_krige@data$residual)
+```
+
+
+
+Kriging Prediction & Map Creation
+```{r}
+
+NO2_krg <- krige(Arithmetic.Mean~1, spdf_NO2, grd_NO2, NO2_fit)
+Ozone_krg <- krige(Arithmetic.Mean~1, spdf_Ozone, grd_Ozone, Ozone_fit)
+PM2.5_krg <- krige(Arithmetic.Mean~1, spdf_PM2.5, grd_PM2.5, PM2.5_fit)
+
+NO2_r <- raster(NO2_krg)
+NO2_m <- mask(NO2_r, study_area)
+tm_shape(NO2_m) + 
+  tm_raster(n=10, palette="-RdBu", auto.palette.mapping=FALSE, 
+            title="NO2 Average Annual Concentration \n(Model=Mat)") +
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_NO2) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+
+Ozone_r <- raster(Ozone_krg)
+Ozone_m <- mask(Ozone_r, study_area)
+tm_shape(Ozone_m) + 
+  tm_raster(n=10, palette="-RdBu", auto.palette.mapping=FALSE, 
+            title="Ozone Average Annual Concentration \n(Model=Lin)") +
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_Ozone) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+
+
+PM2.5_r <- raster(PM2.5_krg)
+PM2.5_m <- mask(PM2.5_r, study_area)
+tm_shape(PM2.5_m) + 
+  tm_raster(n=10, palette="-RdBu", auto.palette.mapping=FALSE, 
+            title="PM2.5 Average Annual Concentration \n(Model=Gau)") +
+  tm_shape(study_area) + tm_borders(col = "black") +
+  tm_shape(spdf_PM2.5) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+```
+
+
+
+
+
+## extracting the data for Clustering
+
+```{r}
+
+study_area$NO2mean <- raster::extract(NO2_raster,study_area,fun=mean)
+study_area$PMmean <- raster::extract(PM2.5_raster,study_area,fun=mean)
+study_area$Ozonemean <- raster::extract(Ozone_raster,study_area,fun=mean)
+vars <- c("NO2mean","PMmean","Ozonemean")
+study_area_dat <- data.frame(study_area@data[,vars])
+
+sdat <- scale(study_area_dat)
+
+```
+
+## Neighbor list
+```{r}
+study_area.nb <- poly2nb(study_area)
+
+plot(study_area, border=grey(.5))
+plot(study_area.nb, coordinates(study_area), col="blue", add=TRUE)
+```
+
+## Minimum spanning tree
+```{r}
+
+lcosts <- nbcosts(study_area.nb,sdat)
+
+study_area.w <- nb2listw(study_area.nb,lcosts,style="B")
+
+study_area.mst <- mstree(study_area.w)
+
+
+plot(study_area.mst,coordinates(study_area),col="blue",cex.lab=0.7)
+plot(study_area,border=gray(.5),add=TRUE)
+```
+
+
+## Contiguity-constrained cluster
+
+```{r}
+clus4 <- skater(study_area.mst[,1:2],sdat,2)
+str(clus4)
+
+plot(clus4,coordinates(study_area),cex.lab=0.7,
+    groups.colors=c("red","green","blue"))
+plot(study_area,border=gray(.5),add=TRUE)
+
+
+plot(study_area,col=c("red","green","blue")[clus4$groups],main = "Spatial Clustering for 3 Pollutents in the Study Area")
+legend(x = "topright",legend = c("NO2","PM2.5","Ozone"),fill =c("red","green","blue"))
+
+```
+
+
